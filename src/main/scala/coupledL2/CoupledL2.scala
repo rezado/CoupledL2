@@ -22,7 +22,7 @@ package coupledL2
 import chisel3._
 import chisel3.util._
 import xs.utils.{DFTResetSignals, FastArbiter, ParallelPriorityMux, Pipeline, RegNextN}
-import xs.utils.perf.{HasPerfEvents, XSPerfAccumulate}
+import xs.utils.perf.{HasPerfEvents, XSPerfAccumulate, HardenXSPerfAccumulate}
 import org.chipsalliance.diplomacy.lazymodule._
 import org.chipsalliance.diplomacy.bundlebridge.{BundleBridgeSink, BundleBridgeSource}
 import freechips.rocketchip.tile.MaxHartIdBits
@@ -597,6 +597,58 @@ abstract class CoupledL2Base(implicit p: Parameters) extends LazyModule with Has
     }
 
     io.l2Miss := RegNext(slices.map(_.io.l2Miss).reduce(_ || _))
+
+    // ==================== Perf Counters ====================
+    // Collect signals from all slices for counting
+    // Note: We use slice.io.in.a to detect requests from L1 caches
+    val slice_read_access = slices.map { slice =>
+      val (first, _, _, _) = node.in.head._2.count(slice.io.in.a)
+      slice.io.in.a.fire && first && slice.io.in.a.bits.opcode === Get
+    }
+    val slice_write_access = slices.map { slice =>
+      val (first, _, _, _) = node.in.head._2.count(slice.io.in.a)
+      slice.io.in.a.fire && first &&
+      (slice.io.in.a.bits.opcode === PutFullData || slice.io.in.a.bits.opcode === PutPartialData)
+    }
+    val slice_read_miss = slices.map { slice =>
+      val (first, _, _, _) = node.in.head._2.count(slice.io.in.a)
+      val isGet = slice.io.in.a.fire && first && slice.io.in.a.bits.opcode === Get
+      isGet && slice.io.l2Miss
+    }
+    val slice_write_miss = slices.map { slice =>
+      val (first, _, _, _) = node.in.head._2.count(slice.io.in.a)
+      val isPut = slice.io.in.a.fire && first &&
+        (slice.io.in.a.bits.opcode === PutFullData || slice.io.in.a.bits.opcode === PutPartialData)
+      isPut && slice.io.l2Miss
+    }
+
+    // Calculate totals
+    val total_read_access = PopCount(VecInit(slice_read_access))
+    val total_write_access = PopCount(VecInit(slice_write_access))
+    val total_read_miss = PopCount(VecInit(slice_read_miss))
+    val total_write_miss = PopCount(VecInit(slice_write_miss))
+
+    // Count conflicts: when multiple banks have requests but only some can proceed
+    // This counts bank-level contention
+    val bank_requests = slices.map { slice =>
+      val (first, _, _, _) = node.in.head._2.count(slice.io.in.a)
+      slice.io.in.a.valid && first
+    }
+    val num_banks_with_req = PopCount(VecInit(bank_requests))
+    val num_banks_firing = PopCount(VecInit(slices.map(_.io.in.a.fire)))
+    // Conflict occurs when multiple banks have requests but fewer fire
+    val conflit_inc = Mux(num_banks_with_req > num_banks_firing && num_banks_firing > 0.U,
+                          num_banks_with_req - num_banks_firing, 0.U)
+
+    // ==================== HardenXSPerfAccumulate ====================
+    // Register performance counters for hardware monitoring
+    // Use module's absolute path to ensure unique names for each L2 instance
+    // The BoringUtils will automatically handle unique naming based on module hierarchy
+    HardenXSPerfAccumulate("L2_read_access", total_read_access)
+    HardenXSPerfAccumulate("L2_write_access", total_write_access)
+    HardenXSPerfAccumulate("L2_read_miss", total_read_miss)
+    HardenXSPerfAccumulate("L2_write_miss", total_write_miss)
+    HardenXSPerfAccumulate("L2_conflict", conflit_inc)
 
     // ==================== XSPerf Counters ====================
     val grant_data_fire = slices.map { slice =>
