@@ -250,6 +250,18 @@ trait HasCoupledL2Parameters {
   def bank_eq(set: UInt, bankId: Int, bankBits: Int): Bool = {
     if(bankBits == 0) true.B else set(bankBits - 1, 0) === bankId.U
   }
+
+  // Dynamic sets support utility
+  def extTagBits = tagBits + setBits
+  def fullExtTagBits = fullTagBits + setBits
+
+  def dynSetMask(set: UInt, dynSetBits: UInt): UInt = {
+    set & ((1.U << dynSetBits) - 1.U)
+  }
+
+  def extendTag(tag: UInt, set: UInt, dynSetBits: UInt): UInt = {
+    Cat(tag, set >> dynSetBits)
+  }
 }
 
 abstract class CoupledL2Base(implicit p: Parameters) extends LazyModule with HasCoupledL2Parameters {
@@ -347,6 +359,7 @@ abstract class CoupledL2Base(implicit p: Parameters) extends LazyModule with Has
       }
       val ramctl = Input(new SramCtrlBundle)
       val l2Busy = Output(Bool()) // Indicate whether L2Cache is busy(has pending requests)
+      val sets = Input(UInt(64.W))
     })
 
     // Display info
@@ -465,6 +478,7 @@ abstract class CoupledL2Base(implicit p: Parameters) extends LazyModule with Has
         }
         in.b.bits.address := restoreAddress(slice.io.in.b.bits.address, i)
         slice.io.sliceId := i.U
+        slice.io.dynSets := io.sets
         slice.io.dft_reset := io.dft.reset.getOrElse(0.U.asTypeOf(new DFTResetSignals))
 
         slice.io.error.ready := enableECC.asBool // TODO: fix the datapath as optional

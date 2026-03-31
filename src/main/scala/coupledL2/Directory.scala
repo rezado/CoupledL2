@@ -126,6 +126,7 @@ class Directory(implicit p: Parameters) extends L2Module {
     val replResp = ValidIO(new ReplacerResult)
     // used to count occWays for Grant to retry
     val msInfo = Vec(mshrsAll, Flipped(ValidIO(new MSHRInfo)))
+    val dynSets = Input(UInt(64.W))
   })
 
   def invalid_way_sel(metaVec: Seq[MetaEntry], repl: UInt) = {
@@ -138,6 +139,8 @@ class Directory(implicit p: Parameters) extends L2Module {
   val sets = cacheParams.sets
   val ways = cacheParams.ways
 
+  val dynSetBits = Log2(io.dynSets)
+
   val tagWen  = io.tagWReq.valid
   val metaWen = io.metaWReq.valid
   val replacerWen = WireInit(false.B)
@@ -147,7 +150,7 @@ class Directory(implicit p: Parameters) extends L2Module {
   private val mbist = p(L2ParamKey).hasMbist
   val tagArray = if (enableTagECC) {
     Module(new SRAMTemplate(
-      gen = UInt((tagBankSplit * encTagBankBits).W),
+      gen = UInt((tagBankSplit * encTagBankBits + setBits).W),
       set = sets,
       way = ways,
       singlePort = true,
@@ -156,7 +159,7 @@ class Directory(implicit p: Parameters) extends L2Module {
     ))
   } else {
     Module(new SRAMTemplate(
-      gen = UInt(tagBits.W),
+      gen = UInt(extTagBits.W),
       set = sets,
       way = ways,
       singlePort = true,
@@ -167,7 +170,7 @@ class Directory(implicit p: Parameters) extends L2Module {
 
   val metaArray = Module(new SRAMTemplate(new MetaEntry, sets, ways, singlePort = true, hasMbist = mbist , suffix = "_l2c_meta"))
 
-  val tagRead_s3 = Wire(Vec(ways, UInt(tagBits.W)))
+  val tagRead_s3 = Wire(Vec(ways, UInt(extTagBits.W)))
   val metaRead = Wire(Vec(ways, new MetaEntry()))
   val errorRead = Wire(Vec(ways, Bool()))
 
@@ -195,25 +198,29 @@ class Directory(implicit p: Parameters) extends L2Module {
   val refillReqValid_s3 = RegNext(refillReqValid_s2, false.B)
 
   // Tag(ECC) R/W
+  val extTagWriteData = extendTag(io.tagWReq.bits.wtag, io.tagWReq.bits.set, dynSetBits)
   val tagWrite = if (enableTagECC) {
-    Cat(VecInit(Seq.tabulate(tagBankSplit)(i =>
-      io.tagWReq.bits.wtag(tagBankBits * (i + 1) - 1, tagBankBits * i))).map(tag => cacheParams.dataCode.encode(tag)))
+    Cat(extTagWriteData(setBits - 1, 0), Cat(VecInit(Seq.tabulate(tagBankSplit)(i =>
+      io.tagWReq.bits.wtag(tagBankBits * (i + 1) - 1, tagBankBits * i))).map(tag => cacheParams.dataCode.encode(tag))))
   } else {
-    io.tagWReq.bits.wtag
+    extendTag(io.tagWReq.bits.wtag, io.tagWReq.bits.set, dynSetBits)
   }
-  val tagRead = tagArray.io.r(io.read.fire, io.read.bits.set).resp.data
-  val bankTagRead = if (enableTagECC) {
-    tagRead.map(x =>
-      Cat(VecInit(Seq.tabulate(tagBankSplit)(i => x(encTagBankBits * (i + 1) - 1, encTagBankBits * i)(tagBankBits - 1, 0))))
-    )
+  val dynReadSet = dynSetMask(io.read.bits.set, dynSetBits)
+  val tagRead = tagArray.io.r(io.read.fire, dynReadSet).resp.data
+    val bankTagRead = if (enableTagECC) {
+      tagRead.map(x => {
+        val eccDecoded = Cat(VecInit(Seq.tabulate(tagBankSplit)(i => x(encTagBankBits * (i + 1) - 1, encTagBankBits * i)(tagBankBits - 1, 0))))
+        val extSetBitsVal = x(tagBankSplit * encTagBankBits + setBits - 1, tagBankSplit * encTagBankBits)
+        Cat(eccDecoded, extSetBitsVal)
+      })
   } else {
     tagRead
   }
-  tagRead_s3 := bankTagRead
+  tagRead_s3 := VecInit(bankTagRead.map(t => t(extTagBits - 1, 0)))
   tagArray.io.w(
     tagWen,
     tagWrite,
-    io.tagWReq.bits.set,
+    dynSetMask(io.tagWReq.bits.set, dynSetBits),
     UIntToOH(io.tagWReq.bits.way)
   )
 
@@ -228,11 +235,11 @@ class Directory(implicit p: Parameters) extends L2Module {
   errorRead := bankTagError
 
   // Meta R/W
-  metaRead := metaArray.io.r(io.read.fire, io.read.bits.set).resp.data
+  metaRead := metaArray.io.r(io.read.fire, dynReadSet).resp.data
   metaArray.io.w(
     metaWen,
     io.metaWReq.bits.wmeta,
-    io.metaWReq.bits.set,
+    dynSetMask(io.metaWReq.bits.set, dynSetBits),
     io.metaWReq.bits.wayOH
   )
 
@@ -240,7 +247,8 @@ class Directory(implicit p: Parameters) extends L2Module {
   val tagAll_s3 = RegEnable(tagRead_s3, 0.U.asTypeOf(tagRead_s3), reqValid_s2 | mbistAck)
   val errorAll_s3 = RegEnable(errorRead, 0.U.asTypeOf(errorRead), reqValid_s2 | mbistAck)
 
-  val tagMatchVec = tagAll_s3.map(_ (tagBits - 1, 0) === req_s3.tag)
+  val extReqTag_s3 = extendTag(req_s3.tag, req_s3.set, dynSetBits)
+  val tagMatchVec = tagAll_s3.map(_(extTagBits - 1, 0) === extReqTag_s3(extTagBits - 1, 0))
   val metaValidVec = metaAll_s3.map(_.state =/= MetaData.INVALID)
   val hitVec = tagMatchVec.zip(metaValidVec).map(x => x._1 && x._2)
 
@@ -251,7 +259,7 @@ class Directory(implicit p: Parameters) extends L2Module {
   // compare is done at Stage2 for better timing
   val occWayMask_s2 = VecInit(io.msInfo.map(s =>
     Mux(
-      s.valid && (s.bits.set === req_s2.set) && (s.bits.blockRefill || s.bits.dirHit),
+      s.valid && (dynSetMask(s.bits.set, dynSetBits) === dynSetMask(req_s2.set, dynSetBits)) && (s.bits.blockRefill || s.bits.dirHit),
       UIntToOH(s.bits.way, ways),
       0.U(ways.W)
     )
@@ -294,7 +302,7 @@ class Directory(implicit p: Parameters) extends L2Module {
   io.resp.bits.hit   := hit_s3
   io.resp.bits.way   := way_s3
   io.resp.bits.meta  := meta_s3
-  io.resp.bits.tag   := tag_s3
+  io.resp.bits.tag   := tag_s3(extTagBits - 1, setBits)
   io.resp.bits.set   := set_s3
   io.resp.bits.error := error_s3  // depends on ECC
   io.resp.bits.replacerInfo := replacerInfo_s3
@@ -313,7 +321,7 @@ class Directory(implicit p: Parameters) extends L2Module {
     }
     0.U
   } else {
-    val repl_sram_r = replacer_sram_opt.get.io.r(io.read.fire, io.read.bits.set).resp.data(0)
+    val repl_sram_r = replacer_sram_opt.get.io.r(io.read.fire, dynReadSet).resp.data(0)
     val repl_state = RegEnable(repl_sram_r, 0.U(repl.nBits.W), reqValid_s2 | mbistAck)
     repl_state
   }
@@ -321,7 +329,7 @@ class Directory(implicit p: Parameters) extends L2Module {
   replaceWay := repl.get_replace_way(repl_state_s3)
 
   io.replResp.valid := refillReqValid_s3
-  io.replResp.bits.tag := tagAll_s3(finalWay)
+  io.replResp.bits.tag := tagAll_s3(finalWay)(extTagBits - 1, setBits)
   io.replResp.bits.set := req_s3.set
   io.replResp.bits.way := finalWay
   io.replResp.bits.meta := metaAll_s3(finalWay)
@@ -374,7 +382,7 @@ class Directory(implicit p: Parameters) extends L2Module {
   if(mbist) {
     val mbistBankTagReadHigh = if (enableTagECC) {
       VecInit(tagRead.map(x =>
-        Cat(VecInit(Seq.tabulate(tagBankSplit)(i => x(encTagBankBits * (i + 1) - 1, encTagBankBits * i)(x.getWidth - 1, tagBankBits))))
+        Cat(VecInit(Seq.tabulate(tagBankSplit)(i => x(encTagBankBits * (i + 1) - 1, encTagBankBits * i)(encTagBankBits - 1, tagBankBits))))
       ))
     } else {
       VecInit(Seq.fill(ways)(0.U))
@@ -400,7 +408,7 @@ class Directory(implicit p: Parameters) extends L2Module {
     replacer_sram_opt.get.io.w(
       !resetFinish || replacerWen,
       Mux(resetFinish, next_state_s3, repl_init.asUInt),
-      Mux(resetFinish, set_s3, resetIdx),
+      Mux(resetFinish, dynSetMask(set_s3, dynSetBits), resetIdx),
       1.U
     )
 
@@ -434,7 +442,7 @@ class Directory(implicit p: Parameters) extends L2Module {
     replacer_sram_opt.get.io.w(
       !resetFinish || replacerWen,
       Mux(resetFinish, next_state_s3, repl_init.asUInt),
-      Mux(resetFinish, set_s3, resetIdx),
+      Mux(resetFinish, dynSetMask(set_s3, dynSetBits), resetIdx),
       1.U
     )
   } else {
@@ -442,7 +450,7 @@ class Directory(implicit p: Parameters) extends L2Module {
     replacer_sram_opt.get.io.w(
       !resetFinish || replacerWen,
       Mux(resetFinish, next_state_s3, 0.U),
-      Mux(resetFinish, set_s3, resetIdx),
+      Mux(resetFinish, dynSetMask(set_s3, dynSetBits), resetIdx),
       1.U
     )
   }

@@ -95,6 +95,7 @@ class DataStorage(implicit p: Parameters) extends L2Module {
     val req = Flipped(ValidIO(new DSRequest))
     val rdata = Output(new DSECCBankBlock)
     val wdata = Input(new DSBlock)
+    val dynSets = Input(UInt(64.W))
   })
 
   // read data is set MultiCycle Path 2
@@ -111,7 +112,8 @@ class DataStorage(implicit p: Parameters) extends L2Module {
     suffix = "_l2c_dat"
   ))
 
-  val arrayIdx = Cat(io.req.bits.way, io.req.bits.set)
+  val dynSetBits = Log2(io.dynSets)
+  val arrayIdx = Cat(io.req.bits.way, dynSetMask(io.req.bits.set, dynSetBits)(setBits - 1, 0))
   val wen = io.req.valid && io.req.bits.wen
   val ren = io.req.valid && !io.req.bits.wen
 
