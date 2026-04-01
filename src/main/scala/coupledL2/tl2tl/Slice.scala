@@ -81,6 +81,7 @@ class Slice()(implicit p: Parameters) extends BaseSlice[OuterBundle] {
   reqArb.io.fromSourceC.foreach(_ := sourceC.io.toReqArb)
   reqArb.io.msInfo := mshrCtl.io.msInfo
 
+  mshrCtl.io.dynMshrs := io.dynMshrs
   mshrCtl.io.fromReqArb.status_s1 := reqArb.io.status_s1
   mshrCtl.io.resps.sinkC := sinkC.io.resp
   mshrCtl.io.resps.sinkD := refillUnit.io.resp

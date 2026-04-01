@@ -43,6 +43,7 @@ abstract class BaseSliceIO[T_OUT <: BaseOuterBundle](implicit p: Parameters) ext
   val dft_reset = Input(new DFTResetSignals)
   val l2Busy = Output(Bool())
   val dynSets = Input(UInt(64.W))
+  val dynMshrs = Input(UInt(64.W))
 }
 
 abstract class BaseSlice[T_OUT <: BaseOuterBundle](implicit p: Parameters) extends L2RawModule with HasPerfEvents with ImplicitClock with ImplicitReset {

@@ -360,6 +360,7 @@ abstract class CoupledL2Base(implicit p: Parameters) extends LazyModule with Has
       val ramctl = Input(new SramCtrlBundle)
       val l2Busy = Output(Bool()) // Indicate whether L2Cache is busy(has pending requests)
       val sets = Input(UInt(64.W))
+      val mshrs = Input(UInt(64.W))
     })
 
     // Display info
@@ -479,6 +480,7 @@ abstract class CoupledL2Base(implicit p: Parameters) extends LazyModule with Has
         in.b.bits.address := restoreAddress(slice.io.in.b.bits.address, i)
         slice.io.sliceId := i.U
         slice.io.dynSets := io.sets
+        slice.io.dynMshrs := io.mshrs
         slice.io.dft_reset := io.dft.reset.getOrElse(0.U.asTypeOf(new DFTResetSignals))
 
         slice.io.error.ready := enableECC.asBool // TODO: fix the datapath as optional
